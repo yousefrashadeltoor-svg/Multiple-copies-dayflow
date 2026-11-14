@@ -1,0 +1,242 @@
+name: Build and validate four DAYFLOW archives
+
+on:
+  push:
+    branches:
+      - audit/four-apps
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: migrate-compose
+            label: DAYFLOW migrate Compose
+            archive: migrate-webview-to-jetpack-compose.zip
+            android_path: android
+            application_id: app.dayflow.android.migrate
+          - id: refactor-native-partial
+            label: DAYFLOW refactor native partial
+            archive: refactor-webview-to-jetpack-compose (1).zip
+            android_path: android
+            application_id: app.dayflow.android.refactorpartial
+          - id: refactor-native
+            label: DAYFLOW refactor native
+            archive: refactor-webview-to-jetpack-compose (2).zip
+            android_path: android
+            application_id: app.dayflow.android.refactornative
+          - id: compose-latest
+            label: DAYFLOW Compose latest
+            archive: refactor-webview-to-jetpack-compose (3).zip
+            android_path: android-compose
+            application_id: app.dayflow.android.compose
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Configure Android SDK without deprecated tools package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          if [[ ! -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" && ! -x "$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]]; then
+            echo "Android SDK command-line tools not found in $SDK_ROOT"
+            exit 1
+          fi
+          if [[ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager"
+          fi
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          # sdkmanager closes stdin after the final license; ignore only yes's expected SIGPIPE.
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract archive and assign a unique package ID
+        id: extract
+        shell: bash
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          APP_ID: ${{ matrix.application_id }}
+          PROJECT_ID: ${{ matrix.id }}
+          ANDROID_PATH: ${{ matrix.android_path }}
+        run: |
+          set -Eeuo pipefail
+          WORK="$GITHUB_WORKSPACE/work/$PROJECT_ID"
+          mkdir -p "$WORK" reports
+          unzip -q "$ARCHIVE" -d "$WORK"
+          APP_GRADLE="$WORK/$ANDROID_PATH/app/build.gradle.kts"
+          if [[ ! -f "$APP_GRADLE" ]]; then
+            echo "Missing app module Gradle file: $APP_GRADLE" | tee "reports/$PROJECT_ID-extract.txt"
+            exit 1
+          fi
+          APP_GRADLE="$APP_GRADLE" APP_ID="$APP_ID" python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          p = Path(os.environ["APP_GRADLE"])
+          s = p.read_text()
+          s2, n = re.subn(r'applicationId\s*=\s*"[^"]+"', f'applicationId = "{os.environ["APP_ID"]}"', s, count=1)
+          if n != 1:
+              raise SystemExit(f"Could not safely replace applicationId in {p}")
+          p.write_text(s2)
+          manifest = p.parent / "src/main/AndroidManifest.xml"
+          if manifest.exists():
+              import re
+              manifest_text = manifest.read_text()
+              # showOnLockScreen is not a valid Android manifest attribute.
+              manifest_text = re.sub(r'\s+android:showOnLockScreen="[^"]+"', "", manifest_text)
+              manifest.write_text(manifest_text)
+          PY
+          echo "work=$WORK" >> "$GITHUB_OUTPUT"
+          echo "android_dir=$WORK/$ANDROID_PATH" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$WORK" >> "$GITHUB_OUTPUT"
+          echo "Package ID set to $APP_ID"
+
+      - name: Apply reviewed source corrections
+        if: matrix.id == 'refactor-native' || matrix.id == 'compose-latest'
+        shell: bash
+        env:
+          WORK: ${{ steps.extract.outputs.work }}
+          ANDROID_PATH: ${{ matrix.android_path }}
+          PROJECT_ID: ${{ matrix.id }}
+        run: |
+          set -Eeuo pipefail
+          base64 -d .github/scripts/patch_android_projects.py.gz.b64 | gzip -d > "$RUNNER_TEMP/patch_android_projects.py"
+          python3 "$RUNNER_TEMP/patch_android_projects.py" "$WORK" "$ANDROID_PATH" "$PROJECT_ID"
+
+      - name: Check manifest components against app source
+        id: component_audit
+        shell: bash
+        env:
+          WORK: ${{ steps.extract.outputs.work }}
+          ANDROID_PATH: ${{ matrix.android_path }}
+        run: |
+          python3 - <<'PY'
+          import os, re, xml.etree.ElementTree as ET
+          from pathlib import Path
+          work = Path(os.environ["WORK"])
+          android = work / os.environ["ANDROID_PATH"]
+          manifest = android / "app/src/main/AndroidManifest.xml"
+          gradle = (android / "app/build.gradle.kts").read_text(errors="replace")
+          m = re.search(r'namespace\s*=\s*"([^"]+)"', gradle)
+          namespace = m.group(1) if m else "app.dayflow.android"
+          report = []
+          if not manifest.exists():
+              report.append(f"Missing manifest: {manifest}")
+          else:
+              tree = ET.parse(manifest)
+              root = tree.getroot()
+              ns = "{http://schemas.android.com/apk/res/android}"
+              names = set()
+              app = root.find("application")
+              if app is not None:
+                  app_name = app.get(ns + "name")
+                  if app_name: names.add(app_name)
+                  for tag in ("activity", "activity-alias", "service", "receiver", "provider"):
+                      for node in app.findall(tag):
+                          for attr in ("name", "targetActivity"):
+                              value = node.get(ns + attr)
+                              if value: names.add(value)
+              classes = set()
+              for base in (android / "app/src/main/java", android / "app/src/main/kotlin"):
+                  if not base.exists(): continue
+                  for f in base.rglob("*"):
+                      if f.suffix not in (".kt", ".java"): continue
+                      text = f.read_text(errors="replace")
+                      pkg = re.search(r'^\s*package\s+([A-Za-z0-9_.]+)', text, re.M)
+                      package = pkg.group(1) if pkg else ""
+                      for cm in re.finditer(r'\b(?:class|object|interface|enum\s+class)\s+([A-Za-z_][A-Za-z0-9_]*)', text):
+                          classes.add((package + "." if package else "") + cm.group(1))
+              for name in sorted(names):
+                  fqcn = namespace + name if name.startswith(".") else name
+                  if fqcn.startswith(("android.", "androidx.", "com.google.", "kotlin.")): continue
+                  if fqcn not in classes:
+                      report.append(f"Manifest component has no app source class: {fqcn}")
+          out = "\n".join(report) if report else "All app-declared components matched source classes."
+          print(out)
+          Path("reports").mkdir(exist_ok=True)
+          Path("reports/component-audit.txt").write_text(out + "\n")
+          valid = not report
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"valid={'true' if valid else 'false'}\n")
+          PY
+
+      - name: Build debug APK and run unit tests
+        if: steps.component_audit.outputs.valid == 'true'
+        id: android_build
+        shell: bash
+        env:
+          ANDROID_DIR: ${{ steps.extract.outputs.android_dir }}
+          PROJECT_ID: ${{ matrix.id }}
+        run: |
+          set -o pipefail
+          mkdir -p reports
+          cd "$ANDROID_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug :app:testDebugUnitTest 2>&1 | tee "$GITHUB_WORKSPACE/reports/$PROJECT_ID-gradle.log"
+
+      - name: Build web preview
+        if: steps.component_audit.outputs.valid == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
+          PROJECT_ID: ${{ matrix.id }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -f "$PROJECT_DIR/package.json" && -f "$PROJECT_DIR/package-lock.json" ]]; then
+            cd "$PROJECT_DIR"
+            npm ci
+            npm run build
+            echo "Web preview build passed for $PROJECT_ID" >> "$GITHUB_WORKSPACE/reports/web-builds.txt"
+          else
+            echo "No root npm project for $PROJECT_ID" >> "$GITHUB_WORKSPACE/reports/web-builds.txt"
+          fi
+
+      - name: Upload verified debug APK
+        if: always() && steps.android_build.outcome == 'success' && steps.component_audit.outputs.valid == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dayflow-apk-${{ matrix.id }}
+          path: ${{ steps.extract.outputs.android_dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dayflow-report-${{ matrix.id }}
+          path: |
+            reports/
+            ${{ steps.extract.outputs.android_dir }}/app/build/outputs/apk/debug/output-metadata.json
+          if-no-files-found: warn
+          retention-days: 14

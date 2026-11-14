@@ -1,0 +1,106 @@
+name: Audit four Android projects
+
+on:
+  push:
+    branches:
+      - audit/four-apps
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract and inspect all four projects
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p audit-source audit-output
+          report="audit-output/REPORT.md"
+          {
+            echo "# Four-project repository audit"
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Runner: $(uname -a)"
+            echo
+          } > "$report"
+
+          archives=(
+            "migrate-webview-to-jetpack-compose.zip"
+            "refactor-webview-to-jetpack-compose (1).zip"
+            "refactor-webview-to-jetpack-compose (2).zip"
+            "refactor-webview-to-jetpack-compose (3).zip"
+          )
+
+          for archive in "${archives[@]}"; do
+            if [[ ! -f "$archive" ]]; then
+              echo "## MISSING: $archive" >> "$report"
+              continue
+            fi
+
+            name="${archive%.zip}"
+            dest="audit-source/$name"
+            mkdir -p "$dest"
+            echo "## $archive" >> "$report"
+            echo >> "$report"
+            echo "- Archive size: $(stat -c%s "$archive") bytes" >> "$report"
+            sha256sum "$archive" >> "$report"
+            unzip -t "$archive" >> "$report"
+            unzip -q "$archive" -d "$dest"
+
+            echo >> "$report"
+            echo "### File inventory (first 1000 paths)" >> "$report"
+            find "$dest" -type f -printf '%P\n' | sort | head -n 1000 >> "$report"
+
+            echo >> "$report"
+            echo "### Build and app entry files" >> "$report"
+            while IFS= read -r file; do
+              rel="${file#$dest/}"
+              echo >> "$report"
+              echo "#### $rel" >> "$report"
+              echo '~~~' >> "$report"
+              sed -n '1,240p' "$file" >> "$report"
+              echo '~~~' >> "$report"
+            done < <(find "$dest" -type f \(
+              -name 'settings.gradle' -o -name 'settings.gradle.kts' -o
+              -name 'build.gradle' -o -name 'build.gradle.kts' -o
+              -name 'gradle.properties' -o -name 'gradle-wrapper.properties' -o
+              -name 'AndroidManifest.xml' -o -name 'package.json' -o
+              -name 'capacitor.config.*' -o -name 'cordova.xml' -o
+              -name 'proguard-rules.pro'
+            \) | sort)
+
+            echo >> "$report"
+            echo "### Android and Gradle file counts" >> "$report"
+            printf "Manifests: " >> "$report"
+            find "$dest" -type f -name AndroidManifest.xml | wc -l >> "$report"
+            printf "Gradle wrappers: " >> "$report"
+            find "$dest" -type f -name gradlew | wc -l >> "$report"
+            printf "Gradle build files: " >> "$report"
+            find "$dest" -type f \( -name build.gradle -o -name build.gradle.kts \) | wc -l >> "$report"
+            printf "Kotlin source files: " >> "$report"
+            find "$dest" -type f -name '*.kt' | wc -l >> "$report"
+            printf "Java source files: " >> "$report"
+            find "$dest" -type f -name '*.java' | wc -l >> "$report"
+            printf "Web source files: " >> "$report"
+            find "$dest" -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' \) | wc -l >> "$report"
+            echo >> "$report"
+          done
+
+          echo "Audit completed." >> "$report"
+
+      - name: Upload extracted sources and audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: four-apps-audit-source
+          path: |
+            audit-source/
+            audit-output/REPORT.md
+          if-no-files-found: error
+          retention-days: 7
