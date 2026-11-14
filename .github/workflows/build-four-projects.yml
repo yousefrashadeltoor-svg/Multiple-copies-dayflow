@@ -113,7 +113,7 @@ jobs:
               import re
               manifest_text = manifest.read_text()
               # showOnLockScreen is not a valid Android manifest attribute.
-              manifest_text = re.sub(r'\\s+android:showOnLockScreen="[^"]+"', "", manifest_text)
+              manifest_text = re.sub(r'\s+android:showOnLockScreen="[^"]+"', "", manifest_text)
               manifest.write_text(manifest_text)
           PY
           echo "work=$WORK" >> "$GITHUB_OUTPUT"
