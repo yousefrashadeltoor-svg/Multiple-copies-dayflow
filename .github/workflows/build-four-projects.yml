@@ -108,6 +108,13 @@ jobs:
           if n != 1:
               raise SystemExit(f"Could not safely replace applicationId in {p}")
           p.write_text(s2)
+          manifest = p.parent / "src/main/AndroidManifest.xml"
+          if manifest.exists():
+              import re
+              manifest_text = manifest.read_text()
+              # showOnLockScreen is not a valid Android manifest attribute.
+              manifest_text = re.sub(r'\\s+android:showOnLockScreen="[^"]+"', "", manifest_text)
+              manifest.write_text(manifest_text)
           PY
           echo "work=$WORK" >> "$GITHUB_OUTPUT"
           echo "android_dir=$WORK/$ANDROID_PATH" >> "$GITHUB_OUTPUT"
