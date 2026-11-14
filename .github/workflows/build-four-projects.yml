@@ -91,7 +91,7 @@ jobs:
           from pathlib import Path
           p = Path(os.environ["APP_GRADLE"])
           s = p.read_text()
-          s2, n = re.subn(r'applicationId\\s*=\\s*"[^"]+"', f'applicationId = "{os.environ["APP_ID"]}"', s, count=1)
+          s2, n = re.subn(r'applicationId\s*=\s*"[^"]+"', f'applicationId = "{os.environ["APP_ID"]}"', s, count=1)
           if n != 1:
               raise SystemExit(f"Could not safely replace applicationId in {p}")
           p.write_text(s2)
@@ -115,7 +115,7 @@ jobs:
           android = work / os.environ["ANDROID_PATH"]
           manifest = android / "app/src/main/AndroidManifest.xml"
           gradle = (android / "app/build.gradle.kts").read_text(errors="replace")
-          m = re.search(r'namespace\\s*=\\s*"([^"]+)"', gradle)
+          m = re.search(r'namespace\s*=\s*"([^"]+)"', gradle)
           namespace = m.group(1) if m else "app.dayflow.android"
           report = []
           if not manifest.exists():
@@ -140,22 +140,22 @@ jobs:
                   for f in base.rglob("*"):
                       if f.suffix not in (".kt", ".java"): continue
                       text = f.read_text(errors="replace")
-                      pkg = re.search(r'^\\s*package\\s+([A-Za-z0-9_.]+)', text, re.M)
+                      pkg = re.search(r'^\s*package\s+([A-Za-z0-9_.]+)', text, re.M)
                       package = pkg.group(1) if pkg else ""
-                      for cm in re.finditer(r'\\b(?:class|object|interface|enum\\s+class)\\s+([A-Za-z_][A-Za-z0-9_]*)', text):
+                      for cm in re.finditer(r'\b(?:class|object|interface|enum\s+class)\s+([A-Za-z_][A-Za-z0-9_]*)', text):
                           classes.add((package + "." if package else "") + cm.group(1))
               for name in sorted(names):
                   fqcn = namespace + name if name.startswith(".") else name
                   if fqcn.startswith(("android.", "androidx.", "com.google.", "kotlin.")): continue
                   if fqcn not in classes:
                       report.append(f"Manifest component has no app source class: {fqcn}")
-          out = "\\n".join(report) if report else "All app-declared components matched source classes."
+          out = "\n".join(report) if report else "All app-declared components matched source classes."
           print(out)
           Path("reports").mkdir(exist_ok=True)
-          Path("reports/component-audit.txt").write_text(out + "\\n")
+          Path("reports/component-audit.txt").write_text(out + "\n")
           valid = not report
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"valid={'true' if valid else 'false'}\\n")
+              f.write(f"valid={'true' if valid else 'false'}\n")
           PY
 
       - name: Build debug APK and run unit tests
