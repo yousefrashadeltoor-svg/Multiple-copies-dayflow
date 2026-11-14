@@ -204,6 +204,8 @@ jobs:
           gradle --no-daemon --stacktrace :app:assembleDebug :app:testDebugUnitTest 2>&1 | tee "$GITHUB_WORKSPACE/reports/$PROJECT_ID-gradle.log"
 
       - name: Build web preview
+        if: steps.component_audit.outputs.valid == 'true'
+        continue-on-error: true
         shell: bash
         env:
           PROJECT_DIR: ${{ steps.extract.outputs.project_dir }}
@@ -220,7 +222,7 @@ jobs:
           fi
 
       - name: Upload verified debug APK
-        if: success() && steps.component_audit.outputs.valid == 'true'
+        if: always() && steps.android_build.outcome == 'success' && steps.component_audit.outputs.valid == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: dayflow-apk-${{ matrix.id }}
