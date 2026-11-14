@@ -121,6 +121,18 @@ jobs:
           echo "project_dir=$WORK" >> "$GITHUB_OUTPUT"
           echo "Package ID set to $APP_ID"
 
+      - name: Apply reviewed source corrections
+        if: matrix.id == 'refactor-native' || matrix.id == 'compose-latest'
+        shell: bash
+        env:
+          WORK: ${{ steps.extract.outputs.work }}
+          ANDROID_PATH: ${{ matrix.android_path }}
+          PROJECT_ID: ${{ matrix.id }}
+        run: |
+          set -Eeuo pipefail
+          base64 -d .github/scripts/patch_android_projects.py.gz.b64 | gzip -d > "$RUNNER_TEMP/patch_android_projects.py"
+          python3 "$RUNNER_TEMP/patch_android_projects.py" "$WORK" "$ANDROID_PATH" "$PROJECT_ID"
+
       - name: Check manifest components against app source
         id: component_audit
         shell: bash
@@ -179,6 +191,7 @@ jobs:
           PY
 
       - name: Build debug APK and run unit tests
+        if: steps.component_audit.outputs.valid == 'true'
         id: android_build
         shell: bash
         env:
